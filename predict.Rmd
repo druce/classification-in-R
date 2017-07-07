@@ -1,0 +1,473 @@
+---
+title: "Equity Premium - Prediction"
+author: "Druce Vertes"
+date: "July 2017"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Initialize
+
+* Libraries to use
+
+```{r libs}
+options(java.parameters='Xmx5g')
+library(plyr)
+library(reshape2)
+library(lattice)
+library(ggplot2)
+library(MASS)
+library(caret)
+library(mlbench)
+library(rpart)
+library(boot)
+
+```
+## Import and clean data
+
+* Import from CSV
+
+```{r import}
+setwd("C:/Users/druce/R/EquityPremium2017")
+data<-read.csv('PredictorData2016q.csv',na.strings = c("NA","#DIV/0!", "","NaN"))
+```
+
+## Clean...Trim NA valued columns
+
+```{r clean1}
+countMissing <- function(mycol) {
+  return (sum(is.na(data[, mycol]))/ nrow(data))
+}
+countNAs <- data.frame(countNA=sapply(colnames(data), countMissing))
+subset(countNAs, countNAs$countNA > 0.5)
+colsToDeleteNA <- countNAs$countNA > 0.5
+data <- data[, !colsToDeleteNA]
+```
+
+## Clean...Trim NA valued rows
+
+```{r clean2}
+rowsToDelete <- data$yyyyq <= 19254
+data <- data[!rowsToDelete,]
+```
+
+## Add EqPrem column, numeric date column for charts
+
+```{r}
+data$EqPrem = data$CRSP_SPvw - data$Rfree
+data$numdate = as.numeric(substring(data$yyyyq, 1,4))+as.numeric(substring(data$yyyyq, 5,5))/4
+
+```
+```{r}
+# functions to do leads and lags
+mylag <- function(v, n){
+  c(rep(NA, n),v[(seq(length(v)-n))])
+}
+
+mylead <- function(v, n){
+  c(v[-n], rep(NA, n))
+}
+
+data$EqPrem = mylead(data$EqPrem,1)
+
+```
+
+## Create a big data frame including all predictors, first diffs lagged up to 2 quarters
+
+```{r}
+#keep 12 predictors plus EqPrem
+# truncate last quarter, no EqPrem to predict
+data2 <- data[1:359,c("D12","E12","b.m","tbl","AAA","BAA","lty","ntis","infl","ltr","corpr","svar","EqPrem")]
+
+# use trailing 1 year inflation
+# should really do cum product of 1+infl , 70s/80s compounding would have made small difference
+rsum.cumsum <- function(x, n = 4L) {
+  tail(cumsum(x) - cumsum(c(rep(0, n), head(x, -n))), -n + 1)
+}
+
+# use real long term yields sted nominal
+data2$infl <- tail(c(rep(NA,3), rsum.cumsum(data$infl)), 359)
+data2$AAA <- data2$AAA - data2$infl
+data2$BAA <- data2$BAA - data2$infl
+data2$lty <- data2$lty - data2$infl
+
+# compute first diffs
+diffs <- tail(data2, -1) - head(data2, -1)
+diffs <- diffs[complete.cases(diffs),]
+
+# truncate oldest 2 qs, no trailing diffs
+bigdata <- tail(data2,-2)
+
+# truncate oldest q
+diffs <- tail(diffs,-1)
+diffs <- diffs[,c("D12","E12","b.m", "tbl","AAA","BAA","lty","ntis","infl","ltr","corpr","svar")]
+names(diffs)<-c("D12.diff","E12.diff","b.m.diff","tbl.diff","AAA.diff","BAA.diff","lty.diff","ntis.diff","infl.diff","ltr.diff","corpr.diff","svar.diff")
+bigdata=merge(bigdata, diffs,by=0)
+
+# add previous quarter's 1st diff for tbl, AAA, BAA, lty, ltr, corpr
+# compute first diffs
+diffs <- tail(data2, -1) - head(data2, -1)
+diffs <- head(diffs, -1)
+diffs <- diffs[,c("tbl","AAA","BAA","lty","ltr","corpr")]
+names(diffs)<-c("tbl.lagdiff","AAA.lagdiff","BAA.lagdiff","lty.lagdiff","ltr.lagdiff","corpr.lagdiff")
+bigdata$rownums=1:nrow(bigdata)
+diffs$rownums=1:nrow(diffs)
+bigdata=merge(bigdata, diffs,by="rownums")
+
+colsToDelete = names(bigdata) %in% c("Row.names", "rownums")
+bigdata <- bigdata[,!colsToDelete]
+
+# truncate oldest 2q, no ntis diff
+bigdata <- tail(bigdata,-2)
+
+```
+
+# Run models
+
+### Run a linear model
+
+```{r}
+fit <- lm(EqPrem~., data=bigdata)
+summary(fit) # show results
+#plot(fit)
+
+
+```
+
+### Run a stepwise regression for variable selection
+
+```{r, results='hide' }
+library(MASS)
+
+step <- stepAIC(fit, direction="both")
+```
+```{r}
+step$anova # display results
+```
+
+## Run a model, with just the useful predictors
+### Slightly lower R-squared, higher adjusted R-squared
+
+```{r}
+
+
+fit2<-lm(EqPrem ~ D12 + E12 + b.m + AAA + BAA + ntis + infl + corpr + 
+    E12.diff + BAA.diff + infl.diff + corpr.diff + AAA.lagdiff + 
+    BAA.lagdiff, data=bigdata)
+summary(fit2) # show results
+#plot(fit2)
+
+
+```
+
+## Run an out of sample test 
+### TODO: don't select the variables using the whole set, which is bad practice/cheating
+
+```{r, echo=TRUE}
+
+# test set v. training set
+# sample(1000,1)
+set.seed(710)
+
+trainindex <- sample(nrow(bigdata), trunc(nrow(bigdata)*.75))
+trainingset <- bigdata[trainindex,] 
+testset <- bigdata[-trainindex, ]
+
+fit3<-lm(EqPrem ~ D12 + E12 + b.m + AAA + BAA + ntis + infl + corpr + 
+    E12.diff + BAA.diff + infl.diff + corpr.diff + AAA.lagdiff + 
+    BAA.lagdiff, data=trainingset)
+summary(fit3) # show results
+
+# R-squared goes up when all we did was reduce the sample size
+# suggests overfitting
+
+# in-sample RMSE
+mdss <- function (var1, var2) {
+  mean((var1 - var2)^2)
+}
+
+MSEis <- mdss(predict(fit3), trainingset$EqPrem)
+print(sqrt(MSEis))
+
+
+# in-sample population standard dev
+print(sqrt(mdss(trainingset$EqPrem, mean(trainingset$EqPrem))))
+
+# check vs. sd function
+sqrt((sd(trainingset$EqPrem))^2 * (nrow(trainingset)-1) / nrow(trainingset))
+
+# bigdata population standard dev
+print(sqrt(mdss(bigdata$EqPrem, mean(bigdata$EqPrem))))
+
+# if out-of-sample RMSE is better than those we are probably predicting something
+
+# in-sample MSE / Population Variance = R-squared  (as a check) 
+print(1- MSEis / mdss(trainingset$EqPrem, mean(trainingset$EqPrem)))
+
+# out-of-sample RMSE 
+mypredict <- predict(fit3, newdata = testset)
+MSEos <- mdss(mypredict, testset$EqPrem)
+print(sqrt(MSEos))
+
+# suppose we just used the mean of training set as predictor, RMSE would be
+print(sqrt(mdss(testset$EqPrem, mean(trainingset$EqPrem))))
+
+# our model predicts worse out-of-sample than just using the training set mean (!)
+#print("out-of-sample MSE / Variance") # out-of-sample R-squared maybe different
+#print("not sure what is correct out-of-sample R-squared formula but")
+#print(1- MSEos / mean((testset$EqPrem - mean(trainingset$EqPrem))^2))
+#print(1- MSEos / mean((testset$EqPrem - mean(testset$EqPrem))^2))
+
+# leave one out cross-validation
+# glm same as lm but supports cross-validation
+
+glm.fit <- glm(EqPrem ~ D12 + E12 + b.m + AAA + BAA + ntis + infl + corpr + 
+             E12.diff + BAA.diff + infl.diff + corpr.diff + AAA.lagdiff + 
+             BAA.lagdiff, data=bigdata)
+# same as fit2
+summary(glm.fit)
+
+cv.err <- cv.glm(bigdata, glm.fit)
+
+print("Leave one out cross-validation RMSE")
+MSEos <- cv.err$delta[1]
+print(sqrt(MSEos))
+
+# larger than in-sample RMSE which makes sense
+# smaller than OOSE RMSE we found with training/test 75%/25% which makes sense
+# smaller than RMSE we get just using the mean of the training set
+# so, if you leave one out, estimate model on remainder, test on one you left out,
+# error is a little smaller than just using a constant
+# a wee bit but not much useful prediction going on 
+
+#print("LOOCV MSE / Variance") # out-of-sample R-squared maybe different
+#print(1- MSEos / mean((bigdata$EqPrem - mean(bigdata$EqPrem))^2))
+
+```
+
+## Plot predicted vs. actual
+
+```{r}
+# scatter plot
+plotframe=data.frame(bigdata$EqPrem, fitted(fit2))
+plot(plotframe, ylab="Predicted", xlab="Actual")
+
+## error plot
+plotframe$numdate <- tail(data$numdate, 352)
+plotframe$err <- plotframe$fitted.fit2. - plotframe$bigdata.EqPrem
+ggplot(data=plotframe, aes(x=numdate, y=err)) + geom_bar(stat="identity")
+
+## bars since 1974
+plotframe2 = plotframe[plotframe$numdate > 2000, c("bigdata.EqPrem", "fitted.fit2." ,  "numdate") ]
+plotframe3 = melt(plotframe2,id="numdate")
+ggplot(plotframe3, aes(x=numdate, y=value, fill=variable)) + geom_bar(stat="identity", position="dodge")
+
+```
+
+# Run caret regression models
+* Observe OOS RMSE with various nonlinear models v. linear model
+
+```{r, warning=FALSE}
+
+library(frbs)
+library(pls)
+library(monomvn)
+library(elasticnet)
+library(foba)
+library(fastICA)
+library(kernlab)
+library(KRLS)
+library(lars)
+library(neuralnet)
+library(nnls)
+library(leaps)
+
+# use same as before
+trainingset <- bigdata[trainindex,] 
+testset <- bigdata[-trainindex, ]
+
+# these returned valid values at one time, maybe a version hell situation, subsequently loaded package broke'em
+# "lars" "lasso", "neuralnet", 'rqlasso', , 'superpc', , 'lasso', "krlsRadial", "krlsPoly", , "rlm"", 'superpc'"
+# , "lmStepAIC" # this one just generates too much annoying output
+
+regressionMethods <- c("lm", "enet", "leapBackward", "leapForward","leapSeq", 
+                       "nnls", "pcr", 'rvmLinear', 'rvmRadial', 'ridge'
+                       )
+
+regressionModels <- array(1:length(regressionMethods))
+regressionTrainPredicts <- data.frame(row.names=row.names(trainingset))
+regressionTestPredicts <- data.frame(row.names=row.names(testset))
+
+print("Out of sample RMSE using various methods")
+
+# trc_cv = trainControl(method="cv")
+i <- 0
+for(mx in regressionMethods) {
+  i <- i + 1
+  print(mx)
+  mymodel <- train(EqPrem ~ D12 + E12 + b.m + AAA + BAA + ntis + infl + corpr + 
+    E12.diff + BAA.diff + infl.diff + corpr.diff + AAA.lagdiff + 
+    BAA.lagdiff, data=trainingset, method=mx, preProc = c("center", "scale"), verbose=FALSE)
+
+  mypredict <- predict(mymodel, newdata = testset)
+  MSEos <- mdss(mypredict, testset$EqPrem)
+  print(sqrt(MSEos))
+
+  regressionModels[i] <- mymodel
+  regressionTrainPredicts[, mx] <- predict(mymodel, newdata=trainingset)
+  regressionTestPredicts[, mx] <- mypredict
+
+}
+
+```
+
+## the nonlinear methods do better, sometimes significantly better
+* note lm model has same OOS RMSE as we found earlier, all the others are smaller
+
+```{r}
+
+mx <- 'leapBackward'
+mymodel <- train(EqPrem ~ D12 + E12 + b.m + AAA + BAA + ntis + infl + corpr + 
+    E12.diff + BAA.diff + infl.diff + corpr.diff + AAA.lagdiff + 
+    BAA.lagdiff, data=trainingset, method=mx, preProc = c("center", "scale"), verbose=FALSE)
+mypredict <- predict(mymodel, newdata = testset)
+
+MSEos <- mdss(mypredict, testset$EqPrem)
+print("Out of sample RMSE")
+print(sqrt(MSEos))  
+
+# suppose we just used the mean of training set as predictor, RMSE would be
+print(sqrt(mdss(mean(trainingset$EqPrem), testset$EqPrem)))
+
+#print(1- MSEos / mean((testset$EqPrem - mean(trainingset$EqPrem))^2))
+#print(1- MSEos / mean((testset$EqPrem - mean(testset$EqPrem))^2))
+
+plotframe <- data.frame(bigdata$EqPrem, predict(mymodel, newdata = bigdata))
+
+plot(plotframe, ylab="Predicted", xlab="Actual")
+
+```
+
+### not good but at least a little more predictive than using the mean or linear model
+
+```{r, warning=FALSE}
+# try preprocessing with PCA
+
+print("Out of sample RMSE using various methods")
+
+for(mx in regressionMethods) {
+
+  trc_cv = trainControl(method="cv")
+
+  print(mx)
+  mymodel <- train(EqPrem ~ ., data=trainingset, method=mx, preProc = c("center", "scale", "pca"),
+                   verbose=FALSE)
+  mypredict <- predict(mymodel, newdata = testset)
+  MSEos <- mean((mypredict - testset$EqPrem)^2)
+  print(sqrt(MSEos))  
+}
+
+```
+### no real help
+
+* Run a binary classification model
+
+* Create indicator for classification
+
+```{r}
+bigdata2=bigdata
+Z <- quantile(bigdata2$EqPrem, probs=c(0,0.5,1)) # really just need 0.5
+bigdata2$EqPremResponse=1
+bigdata2$EqPremResponse[bigdata$EqPrem < Z[2]] = 0
+hist(bigdata2$EqPremResponse)
+# some algos try todo regression instead of classification on numbers, or error
+bigdata2$EqPremResponse <- as.factor(bigdata2$EqPremResponse)
+bigdata2 = bigdata2[, !(colnames(bigdata2) == "EqPrem")]
+```
+Create training and test sets
+```{r}
+# create training and test sets
+# use same samples as earlier
+
+trainingset <- bigdata2[trainindex,] 
+testset <- bigdata2[-trainindex, ]
+```
+Predict quantiles using a variety of algorithms
+```{r, warning=FALSE}
+
+# "nnet", "pcaNNet", "stepLDA", "stepQDA" don't work great and generate pages of output
+
+myMethods <- c("gbm", "lda", "lda2", "LogitBoost", "multinom", "nb", "qda", "rf", 'rocc', "svmLinear","svmRadial", "svmRadialWeights", "treebag", "bartMachine", "deepboost")
+
+#myMethods <- c("lda")
+
+trc_cv = trainControl(method="cv")
+
+# center and scale for better performance on some methods
+runModel <- function(mxpar) {
+    return (train(EqPremResponse ~ ., data=trainingset, method=mxpar, 
+                  preProc = c("center", "scale"), verbose=FALSE))
+}
+
+for(mx in myMethods) {
+  print(mx)
+  mymodel = runModel(mx)
+
+  print("Training set confusion matrix")
+  myPredict <- data.frame(prediction=predict(mymodel, trainingset))
+  myPredict$EqPremResponse<-trainingset$EqPremResponse
+  print(confusionMatrix(myPredict$prediction, myPredict$EqPremResponse))
+
+  print("Test set confusion matrix")
+  myPredict <- data.frame(prediction=predict(mymodel, testset))
+  myPredict$EqPremResponse<-testset$EqPremResponse
+  print(confusionMatrix(myPredict$prediction, myPredict$EqPremResponse))
+}
+
+
+```
+
+## Chart correct vs. incorrect
+
+```{r}
+myPredict <- data.frame(prediction=predict(mymodel, bigdata2))
+myPredict$EqPremResponse<-bigdata2$EqPremResponse
+myPredict$numdate <- tail(data$numdate, nrow(myPredict))
+myPredict$correct <- (myPredict$prediction==myPredict$EqPremResponse)
+ggplot(myPredict, aes(x=numdate, y=EqPremResponse, color=correct)) + geom_point()
+```
+## Just for grins, predict on regressionTestPredicts
+
+* kitchen sink ensemble methods FTW
+
+```{r, warning=FALSE}
+regressionTrainPredicts$EqPremResponse <- trainingset$EqPremResponse
+runModel <- function(mxpar) {
+    return (train(EqPremResponse ~ ., data=regressionTrainPredicts, method=mxpar, 
+                  preProc = c("center", "scale"), verbose=FALSE))
+}
+
+#myMethods <- c("ada", "AdaBag", "adaboost", "bartMachine", "deepboost", "gbm", "lda", "LogitBoost", "multinom", "nb", "nnet", "pcaNNet", "rf", 'rocc', "stepLDA", "stepQDA", "svmLinear","svmRadial", "svmRadialWeights", "treebag")
+
+myMethods <- c("bartMachine", "deepboost", "gbm", "lda", "rf", 'rocc', "svmLinear","svmRadial", "svmRadialWeights")
+
+for(mx in myMethods) {
+  print(Sys.time())
+  print(mx)
+  mymodel = runModel(mx)
+
+  print("Training set confusion matrix")
+  myPredict <- data.frame(prediction=predict(mymodel, regressionTrainPredicts))
+  myPredict$EqPremResponse<-trainingset$EqPremResponse
+  print(confusionMatrix(myPredict$prediction, myPredict$EqPremResponse))
+
+  print("Test set confusion matrix")
+  myPredict <- data.frame(prediction=predict(mymodel, regressionTestPredicts))
+  myPredict$EqPremResponse<-testset$EqPremResponse
+  print(confusionMatrix(myPredict$prediction, myPredict$EqPremResponse))
+}
+
+```
