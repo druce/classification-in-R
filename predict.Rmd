@@ -8,7 +8,13 @@ output: pdf_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
+## Equity Premium Prediction in R
+* Using [dataset](http://www.hec.unil.ch/agoyal/docs/PredictorData2016.xlsx) from [Prof. Amit Goyal](http://www.hec.unil.ch/agoyal/), attempt to predict quarterly equity outperformance using fundamental data like interest rates, valuation. 
+* This should be considered exploratory data analysis and a demo of R regression and classification using the caret package.
+* No predictive value from regression.
+* Some binary classification algorithms achieve > 60% accuracy out of sample in predicting whether equity premium will exceed long-term median
 
+----
 ## Initialize
 
 * Libraries to use
@@ -289,6 +295,8 @@ library(leaps)
 trainingset <- bigdata[trainindex,] 
 testset <- bigdata[-trainindex, ]
 
+# list of models supported by caret framewordk: https://topepo.github.io/caret/available-models.html
+
 # these returned valid values at one time, maybe a version hell situation, subsequently loaded package broke'em
 # "lars" "lasso", "neuralnet", 'rqlasso', , 'superpc', , 'lasso', "krlsRadial", "krlsPoly", , "rlm"", 'superpc'"
 # , "lmStepAIC" # this one just generates too much annoying output
@@ -452,7 +460,7 @@ runModel <- function(mxpar) {
 
 #myMethods <- c("ada", "AdaBag", "adaboost", "bartMachine", "deepboost", "gbm", "lda", "LogitBoost", "multinom", "nb", "nnet", "pcaNNet", "rf", 'rocc', "stepLDA", "stepQDA", "svmLinear","svmRadial", "svmRadialWeights", "treebag")
 
-myMethods <- c("bartMachine", "deepboost", "gbm", "lda", "rf", 'rocc', "svmLinear","svmRadial", "svmRadialWeights")
+myMethods <- c("ada", "AdaBag", "adaboost", "bartMachine", "deepboost", "gbm", "lda", "rf", 'rocc', "svmLinear","svmRadial", "svmRadialWeights")
 
 for(mx in myMethods) {
   print(Sys.time())
